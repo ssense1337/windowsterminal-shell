@@ -7,7 +7,9 @@ param(
     [ValidateSet('Default', 'Flat', 'Mini')]
     [string] $Layout = 'Default',
     [Parameter()]
-    [switch] $PreRelease
+    [switch] $PreRelease,
+    [Parameter()]
+    [switch] $Extended
 )
 
 function Generate-HelperScript(
@@ -21,12 +23,14 @@ function Generate-HelperScript(
      folder = WScript.Arguments(1)
      If Wscript.Arguments.Count > 2 Then
          profile = WScript.Arguments(2)
-         ' 0 at the end means to run this command silently
-         shell.ShellExecute `"powershell`", `"Start-Process \`"`"`" & executable & `"\`"`" -ArgumentList \`"`"-p \`"`"\`"`"`" & profile & `"\`"`"\`"`" -d \`"`"\`"`"`" & folder & `"\`"`"\`"`" \`"`" `", `"`", `"runas`", 0
+         shell.ShellExecute executable, `"-p `" & Quote(profile) & `" -d `" & Quote(folder), `"`", `"runas`", 1
      Else
-         ' 0 at the end means to run this command silently
-         shell.ShellExecute `"powershell`", `"Start-Process \`"`"`" & executable & `"\`"`" -ArgumentList \`"`"-d \`"`"\`"`"`" & folder & `"\`"`"\`"`" \`"`" `", `"`", `"runas`", 0
+         shell.ShellExecute executable, `"-d `" & Quote(folder), `"`", `"runas`", 1
      End If
+
+     Function Quote(str)
+         Quote = `"`"`"`" & str & `"`"`"`"
+     End Function
     "
     Set-Content -Path "$cache/helper.vbs" -Value $content
 }
@@ -329,12 +333,17 @@ function CreateMenuItem(
     [Parameter(Mandatory=$true)]
     [string]$command,
     [Parameter(Mandatory=$true)]
-    [bool]$elevated
+    [bool]$elevated,
+    [Parameter(Mandatory=$false)]
+    [bool]$parent = $true
 )
 {
     New-Item -Path $rootKey -Force | Out-Null
     New-ItemProperty -Path $rootKey -Name 'MUIVerb' -PropertyType String -Value $name | Out-Null
     New-ItemProperty -Path $rootKey -Name 'Icon' -PropertyType String -Value $icon | Out-Null
+    if ($Extended -and $parent) {
+        New-ItemProperty -Path $rootKey -Name 'Extended' -PropertyType String -Value '' | Out-Null
+    }
     if ($elevated) {
         New-ItemProperty -Path $rootKey -Name 'HasLUAShield' -PropertyType String -Value '' | Out-Null
     }
@@ -357,24 +366,51 @@ function CreateProfileMenuItems(
     [Parameter(Mandatory=$true)]
     [string]$layout,
     [Parameter(Mandatory=$true)]
-    [bool]$isPreview)
+    [bool]$isPreview,
+    [Parameter(Mandatory=$true)]
+    [string]$itemName)
 {
-    $guid = $profile.guid
+    $guid = $itemName
     $name = $profile.name
-    $command = """$executable"" -p ""$name"" -d ""%V."""
-    $elevated = "wscript.exe ""$localCache/helper.vbs"" ""$executable"" ""%V."" ""$name"""
+    $command = """$executable"" -p ""$name"" -d ""%V"""
+    $elevated = "wscript.exe ""$localCache/helper.vbs"" ""$executable"" ""%V"" ""$name"""
     $profileIcon = GetProfileIcon $profile $folder $localCache $icon $isPreview
 
     if ($layout -eq "Default") {
         $rootKey = "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\ContextMenus\MenuTerminal\shell\$guid"
         $rootKeyElevated = "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\ContextMenus\MenuTerminalAdmin\shell\$guid"
-        CreateMenuItem $rootKey $name $profileIcon $command $false
-        CreateMenuItem $rootKeyElevated $name $profileIcon $elevated $true
+        CreateMenuItem $rootKey $name $profileIcon $command $false $false
+        CreateMenuItem $rootKeyElevated $name $profileIcon $elevated $true $false
     } elseif ($layout -eq "Flat") {
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal_$guid" "$name here" $profileIcon $command $false
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin_$guid" "$name here as administrator" $profileIcon $elevated $true   
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal_$guid" "$name here" $profileIcon $command $false
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin_$guid" "$name here as administrator" $profileIcon $elevated $true   
+    }
+}
+
+function CreateMenuGroup(
+    [Parameter(Mandatory=$true)]
+    [string]$rootKey,
+    [Parameter(Mandatory=$true)]
+    [string]$name,
+    [Parameter(Mandatory=$true)]
+    [string]$icon,
+    [Parameter(Mandatory=$true)]
+    [bool]$elevated
+)
+{
+    New-Item -Path $rootKey -Force | Out-Null
+    New-ItemProperty -Path $rootKey -Name 'MUIVerb' -PropertyType String -Value $name | Out-Null
+    New-ItemProperty -Path $rootKey -Name 'Icon' -PropertyType String -Value $icon | Out-Null
+    if ($Extended) {
+        New-ItemProperty -Path $rootKey -Name 'Extended' -PropertyType String -Value '' | Out-Null
+    }
+    if ($elevated) {
+        New-ItemProperty -Path $rootKey -Name 'HasLUAShield' -PropertyType String -Value '' | Out-Null
+        New-ItemProperty -Path $rootKey -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminalAdmin' | Out-Null
+    } else {
+        New-ItemProperty -Path $rootKey -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminal' | Out-Null
     }
 }
 
@@ -398,32 +434,16 @@ function CreateMenuItems(
 
     if ($layout -eq "Default") {
         # defaut layout creates two menus
-        New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal' -Force | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal' -Name 'MUIVerb' -PropertyType String -Value 'Windows Terminal here' | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal' -Name 'Icon' -PropertyType String -Value $icon | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal' -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminal' | Out-Null
-
-        New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal' -Force | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal' -Name 'MUIVerb' -PropertyType String -Value 'Windows Terminal here' | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal' -Name 'Icon' -PropertyType String -Value $icon | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal' -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminal' | Out-Null
-
+        CreateMenuGroup 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminal' 'Windows Terminal here' $icon $false
+        CreateMenuGroup 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminal' 'Windows Terminal here' $icon $false
         New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\ContextMenus\MenuTerminal\shell' -Force | Out-Null
 
-        New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin' -Force | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin' -Name 'MUIVerb' -PropertyType String -Value 'Windows Terminal here as administrator' | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin' -Name 'Icon' -PropertyType String -Value $icon | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin' -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminalAdmin' | Out-Null
-
-        New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin' -Force | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin' -Name 'MUIVerb' -PropertyType String -Value 'Windows Terminal here as administrator' | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin' -Name 'Icon' -PropertyType String -Value $icon | Out-Null
-        New-ItemProperty -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin' -Name 'ExtendedSubCommandsKey' -PropertyType String -Value 'Directory\\ContextMenus\\MenuTerminalAdmin' | Out-Null
-
+        CreateMenuGroup 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdmin' 'Windows Terminal here as administrator' $icon $true
+        CreateMenuGroup 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalAdmin' 'Windows Terminal here as administrator' $icon $true
         New-Item -Path 'Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\ContextMenus\MenuTerminalAdmin\shell' -Force | Out-Null
     } elseif ($layout -eq "Mini") {
-        $command = """$executable"" -d ""%V."""
-        $elevated = "wscript.exe ""$localCache/helper.vbs"" ""$executable"" ""%V."""
+        $command = """$executable"" -d ""%V"""
+        $elevated = "wscript.exe ""$localCache/helper.vbs"" ""$executable"" ""%V"""
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalMini" "Windows Terminal here" $icon $command $false
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\shell\MenuTerminalAdminMini" "Windows Terminal here as administrator" $icon $elevated $true   
         CreateMenuItem "Registry::HKEY_CURRENT_USER\SOFTWARE\Classes\Directory\Background\shell\MenuTerminalMini" "Windows Terminal here" $icon $command $false
@@ -433,8 +453,8 @@ function CreateMenuItems(
 
     $isPreview = $folder -like "*WindowsTerminalPreview*"
     $profiles = GetActiveProfiles $isPreview
-    foreach ($profile in $profiles) {
-        CreateProfileMenuItems $profile $executable $folder $localCache $icon $layout $isPreview
+    for ($index = 0; $index -lt $profiles.Count; $index++) {
+        CreateProfileMenuItems $profiles[$index] $executable $folder $localCache $icon $layout $isPreview "Item$index"
     }
 }
 
